@@ -1,0 +1,1245 @@
+---
+title: "Pest distribution modelling"
+author: "Gabor Pozsgai"
+date: "`r Sys.Date()`"
+output: html_document
+# bibliography: my_references.bib
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+knitr::opts_chunk$set(tidy = TRUE, tidy.opts = list(comment = FALSE))
+options(dplyr.summarise.inform = FALSE)
+
+```
+
+```{r load-packages}
+library(rstudioapi)
+library(openxlsx)
+library(readr)
+library(tidyverse)
+library(leaflet)
+library(rnaturalearth)      #for downloading maps
+library(sf)                 #for manipulating downloaded maps
+library(sp)
+library(geodata)
+library(dismo)
+library(raster)
+library(ggmap)
+library(ggpubr)
+library(terra)
+library(exactextractr)
+library(ggnewscale)
+
+
+# writeLines(toBibtex(citation("dismo")), "my_references.bib")
+
+select<-dplyr::select
+rescale<-scales::rescale
+
+```
+```{r load-functions}
+source("function_sources.R")
+```
+
+```{r important-variables}
+pest_folder<-"../Raw_data/pests/"
+NE_folder<-"../Raw_data/NEs/"
+
+behrmann_crs <- "+proj=cea +lon_0=0 +lat_ts=30 +datum=WGS84 +units=m +no_defs"
+
+# larger scale than world
+world_map <- ne_countries(returnclass = "sf", scale = 110) 
+world_map <-st_transform(world_map, crs = behrmann_crs)
+
+world <- ne_countries(scale = "medium")
+world <- st_transform(world, crs = behrmann_crs)
+
+if (file.exists("../Calculated_data/hex_grid_equal_area.RDA")) {
+  load("../Calculated_data/hex_grid_equal_area.RDA")} else {
+    
+    # Generate hexagons with a fixed **size in meters** instead of degrees
+    hex_points <- spsample(as_Spatial(world), type = "hexagonal", cellsize = 20000)
+    hex_grid <- st_as_sf(HexPoints2SpatialPolygons(hex_points, dx = 20000), 
+                         crs = equal_area_crs)
+    hex_grid<-st_make_valid(hex_grid)
+    hex_grid$hex_id<-1:nrow(hex_grid)
+    hex_grid$hex_id<-as.character(hex_grid$hex_id)
+    
+    large_hex_points <- spsample(as_Spatial(world), type = "hexagonal", 
+                                 cellsize = 200000)
+    large_hex_grid <- st_as_sf(HexPoints2SpatialPolygons(large_hex_points, 
+                                                         dx = 200000), crs = 
+                                 equal_area_crs)
+    large_hex_grid<-st_make_valid(large_hex_grid)
+    large_hex_grid$hex_id<-1:nrow(large_hex_grid)
+    large_hex_grid$hex_id<-as.character(large_hex_grid$hex_id)
+    
+    save(hex_points, hex_grid, large_hex_points, large_hex_grid, file =  "../Calculated_data/hex_grid_equal_area.RDA")
+  }
+
+# for some reason loaded and re-generated hex grids do not match, projection seems to be off.
+# Must be double checked.
+hex_grid$hex_id<-as.character(hex_grid$hex_id)
+
+# Download current WorldClim data
+# Parameters:
+# var: "bio" for bioclimatic variables, 
+# "tmin" for minimum temperature, etc.
+# res: resolution in minutes (e.g., 10 = 10 arc-minutes)
+current_climate <- worldclim_global(var = "bio", res = 10, 
+                                    path = "climate_data")
+
+# Load the bioclimatic variables as a RasterStack
+current_stack <- stack(current_climate)
+
+
+future_climate_moderate <- cmip6_world(
+  model = "MIROC6",   # Climate model
+  ssp = "245",        # SSP2-4.5 scenario (moderate)
+  time = "2061-2080", # Mid-late century time period
+  var = "bio",        # Bioclimatic variables
+  res = 10,           # Resolution (10-minute)
+  path = "climate_data"
+)
+
+# High Emissions (SSP5-8.5) - MIROC6 model  -Business as usual
+future_climate_high <- cmip6_world(
+  model = "MIROC6",
+  ssp = "585",   # SSP 3-7.0 scenario
+  time = "2061-2080", # Late-century time period
+  var = "bio",   # Bioclimatic variables
+  res = 10,      # Resolution
+  path = "climate_data"
+)
+
+# Load the future climate data as a RasterStack
+future_stack_moderate <- stack(future_climate_moderate)
+
+future_stack_high <- stack(future_climate_high)
+
+names(future_stack_moderate) <- names(current_stack)
+names(future_stack_high) <- names(current_stack)
+
+
+# Reproject climate rasters to Behrmann projection
+current_stack <- projectRaster(current_stack, crs = behrmann_crs, method = "bilinear")
+future_stack_moderate <- projectRaster(future_stack_moderate, crs = behrmann_crs, method = "bilinear")
+future_stack_high <- projectRaster(future_stack_high, crs = behrmann_crs, method = "bilinear")
+
+
+# loading already cleared messy data
+
+if (file.exists("../Raw_data/cleaned_messy_data.RDA")) {
+  load("../Raw_data/cleaned_messy_data.RDA")} else {
+    source("messy_data_cleaning.R") # will take some time and need internet connection
+  }
+
+#Mononychellus_tanajoa
+Mononychellus_tanajoa_occ_points<-st_transform(Mononychellus_tanajoa_occ_points,
+                                               crs = behrmann_crs)
+Mononychellus_tanajoa_hex_grid<-observations2grid(hex_grid, Mononychellus_tanajoa_occ_points)
+Mononychellus_tanajoa_large_hex_grid<-observations2grid(large_hex_grid, Mononychellus_tanajoa_occ_points)
+
+#Mononychellus_tanajoa parasitoids
+Mononychellus_tanajoa_parasitoids_occ_points<-st_transform(Mononychellus_tanajoa_parasitoids_occ_points, crs = behrmann_crs)
+Mononychellus_tanajoa_parasitoids_hex_grid<-observations2grid(hex_grid, Mononychellus_tanajoa_parasitoids_occ_points)
+Mononychellus_tanajoa_parasitoids_large_hex_grid<-observations2grid(large_hex_grid, Mononychellus_tanajoa_parasitoids_occ_points)
+
+#Phenacoccus_manihotia
+
+Phenacoccus_manihoti_occ_points<-st_transform(Phenacoccus_manihoti_occ_points, crs = behrmann_crs)
+Phenacoccus_manihoti_hex_grid<-observations2grid(hex_grid, Phenacoccus_manihoti_occ_points)
+Phenacoccus_manihoti_large_hex_grid<-observations2grid(large_hex_grid, Phenacoccus_manihoti_occ_points)
+
+#Phenacoccus_manihotia parasitoids
+Phenacoccus_manihoti_parasitoids_occ_points<-st_transform(Phenacoccus_manihoti_parasitoids_occ_points, crs = behrmann_crs)
+Phenacoccus_manihoti_parasitoids_hex_grid<-observations2grid(hex_grid, Phenacoccus_manihoti_parasitoids_occ_points)
+Phenacoccus_manihoti_parasitoids_large_hex_grid<-observations2grid(large_hex_grid, Phenacoccus_manihoti_parasitoids_occ_points)
+
+# load ant raster in Behrmann crs (as published)
+ant_diversity_raster <- raster("../GIS/ant_sp_richness_msk.tif")
+ant_diversity_raster <- projectRaster(ant_diversity_raster, crs = behrmann_crs, method = "bilinear")
+
+
+palette_spread <- scale_fill_gradientn(colors = c("#FFFF99", "red4"), 
+                                       name = "Spread",
+                                       guide = guide_colorbar(order = 2))
+palette_recede <- scale_fill_gradientn(colors = c("#00FFFF", "purple4"), 
+                                       name = "Recede",
+                                       guide = guide_colorbar(order = 1))
+palette_stable <- scale_fill_gradientn(colors = c("#CCFF66", "tan4"), 
+                                       name = "Stable",
+                                       guide = guide_colorbar(order = 3))
+pest_list<-c("Aphis_gossypii", "Bactrocera_dorsalis", "Bemisia_tabaci", 
+"Diaphorina_citri", "Helicoverpa_armigera", "Maconellicoccus_hirsutus", 
+"Mononychellus_tanajoa", "Nilaparvata_lugens", "Paracoccus_marginatus", 
+"Phenacoccus_manihoti", "Phthorimaea_operculella", "Plutella_xylostella", 
+"Sitobion_avenae", "Spodoptera_frugiperda")
+
+pest_colors <-c(
+  "#D72638",  # Crimson Red (inspired by poppies and Rembrandt's reds)
+  "#E27D60",  # Soft Vermilion (from autumn leaves and vintage palettes)
+  "#F4A261",  # Warm Golden Orange (Van Gogh’s sunflower hues)
+  "#E9C46A",  # Sunlit Yellow Ochre (earthy, found in classical paintings)
+  "#A8C686",  # Olive Sage Green (muted, inspired by renaissance landscapes)
+  "#2A9D8F",  # Emerald Teal (kingfisher feathers, ocean shallows)
+  "#3282B8",  # Sky Blue (soft but vibrant, from Impressionist paintings)
+  "#3B6978",  # Deep Slate Blue (reminiscent of twilight skies)
+  "#576490",  # Subtle Indigo Blue (seen in evening shadows)
+  "#B56576",  # Vintage Rosewood (a warm, soft burgundy-pink)
+  "#D4A5A5",  # Dusty Blush Pink (from classic frescoes and florals)
+  "#765D69",  # Muted Plum Brown (earthy and elegant, inspired by aged wine)
+  "#5E503F",  # Deep Umber Brown (rich soil, Rembrandt’s darks)
+  "#7E8185"   # Classic Silver Grey (subtle, misty morning tones)
+)
+
+
+pest_groups<-data.frame(pest_species = pest_list, pest_group = c("many NEs", "few NEs", "many NEs",
+                                                         "few NEs", "many NEs","few NEs", 
+                                                         "many NEs","few NEs", "few NEs",
+                                                         "many NEs","many NEs","many NEs",
+                                                         "few NEs","few NEs"))
+
+```
+
+# Collecting data for each pest and natural enemy (NE) species
+
+## Available pest data
+
+Creating a list of all pests. Making a three data matrices of all UTM squares/hexagons/cells they are recorded from in the rows and 1) all predators, 2) all parasitoids, and 3) all NE species they are linked to in the columns with the number of records from one cell as data. Adding a vector with the summary values of all predators, parasitoids and all NEs, the number of records, number of squares recorded from to the list.
+
+```{r collecting-pest-data}
+
+if (file.exists("../Calculated_data/pest_data_list_equal_area.RDA")) {
+  load("../Calculated_data/pest_data_list_equal_area.RDA")} else {
+    source("pest_observed_distribution.R")
+  }
+
+# free up some memory
+gc()
+
+```
+
+```{r pest-occurrance-maps, fig.dim=c(16, 12)}
+
+pest_occurrance_maps<-lapply(pest_list, function(x) {
+  # x = "Aphis_gossypii"
+  dat<-pest_data_list[[x]][["pest_large_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(large_hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = log(observation_count)),
+            color = NA, linewidth = 0.1) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #cale_color_viridis_c(option = "plasma", na.value = "grey90", guide = "none") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Observation Count"
+    )
+})
+
+ggarrange(plotlist = pest_occurrance_maps, ncol=4, nrow=4, common.legend = T)
+
+ggsave(file = "../Plots/pest_occurrance_maps_large_grid_equal_area.pdf", width  = 16, height = 12)
+
+```
+
+## Available NE data
+
+Creating a list of all NEs. Making a data matrix of all UTM squares/hexagons/cells they are recorded from in the rows and all pest species they are linked to in the columns with the number of records from one cell as data. Adding a vector with the summary values of all controlled pests, number of records, number of squares recorded from to the list.
+
+```{r NE-lists}
+parasitoid_list<-sapply(pest_list, function(x){
+  # x = "Bactrocera_dorsalis"
+  cat(x)
+  dat<-as.data.frame(pest_data_list[[x]][["parasitoid_occ_points"]])
+  
+  dat |> select(species) |> 
+    distinct() |> 
+    pull()
+})
+
+sum(sapply(parasitoid_list, length))
+
+
+all_parasitoids<-sort(unique(unlist(parasitoid_list)))
+
+
+parasitoid_hosts<-sapply(all_parasitoids, function(x)
+{names(parasitoid_list)[which(sapply(parasitoid_list, function(y) {x %in% y}))]})
+
+# predators
+predator_list<-sapply(pest_list, function(x){
+  # x = "Bactrocera_dorsalis"
+  # x = "Aphis_gossypii"
+  cat(x)
+  dat<-as.data.frame(pest_data_list[[x]][["predator_occ_points"]])
+  
+  if(length(dat)>1){
+    
+    dat |> select(species) |> 
+      distinct() |> 
+      pull()
+  }
+})
+
+sum(sapply(predator_list, length))
+
+
+all_predators<-sort(unique(unlist(predator_list)))
+
+
+predators_preys<-sapply(all_predators, function(x)
+{names(predator_list)[which(sapply(predator_list, function(y) {x %in% y}))]})
+
+```
+
+# Modelling current distributions
+
+## Modelled distributions of pests
+
+We model the current distribution of pests and we add a data frame of all UTM squares/hexagons/cells they are expected to occur to the list.
+
+```{r pest-current-square-counting}
+
+
+if (file.exists("../Calculated_data/pest_modelled_current_distribution_list_equal_area.RDA")) {
+  load("../Calculated_data/pest_modelled_current_distribution_list_equal_area.RDA")} else {
+    source("pest_modelled_current_distribution.R")
+  }
+
+
+```
+
+We also map the model of the current distribution of pests.
+
+```{r pest-current-map, fig.dim=c(16, 12)}
+
+# suitability maps
+pest_current_suitability_maps<-lapply(pest_list, function(x) {
+  # x = "Aphis_gossypii"
+  dat<-pest_modelled_current_distribution_list[[x]][["current_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = mean_suitability),
+            color = NA, linewidth = 0.1) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #cale_color_viridis_c(option = "plasma", na.value = "grey90", guide = "none") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Mean suitability"
+    )
+})
+
+(pest_current_suitability_maps_equal_area<-
+  ggarrange(plotlist = pest_current_suitability_maps, 
+            ncol=4, nrow=4, common.legend = T))
+
+ggsave(file = "../Plots/pest_current_suitability_maps_equal_area.pdf", 
+       pest_current_suitability_maps_equal_area,
+       width  = 16, height = 12)
+
+pest_current_ant_diversity_maps<-lapply(pest_list, function(x) {
+  # x = "Aphis_gossypii"
+  dat<-pest_modelled_current_distribution_list[[x]][["current_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = log1p(ant_diversity)),
+            color = NA, linewidth = 0.1) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #cale_color_viridis_c(option = "plasma", na.value = "grey90", guide = "none") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Ant diversity"
+    )
+})
+
+(pest_current_ant_diversity_maps_equal_area<-
+  ggarrange(plotlist = pest_current_ant_diversity_maps, ncol=4, nrow=4, 
+            common.legend = T))
+
+ggsave(file = "../Plots/pest_current_ant_diversity_maps_equal_area.pdf", 
+       pest_current_ant_diversity_maps_equal_area,
+       width  = 16, height = 12)
+
+```
+
+## Modelled distributions of natural enemies
+
+We model the current distribution of NEs and we add a data frame of all UTM squares/hexagons/cells they are expected to occur to the list.
+
+```{r parasitoid-square-counting}
+
+if (file.exists("../Calculated_data/parasitoid_modelled_current_distribution_list_equal_area.RDA")) {
+  load("../Calculated_data/parasitoid_modelled_current_distribution_list_equal_area.RDA")} else {
+    source("parasitoid_modelled_current_distribution.R")
+  }
+
+
+parasitoid_modelled_current_DF<-parasitoid_modelled_current_distribution_list
+
+# parasitoid_modelled_current_DF<-
+#   lapply(parasitoid_modelled_current_distribution_list, function(x){
+#     
+#     x[["current_hex_grid"]] |> 
+#       sf::st_drop_geometry() |> 
+#       as.data.frame()
+#   })
+
+```
+
+```{r predator-square-counting}
+
+if (file.exists("../Calculated_data/predator_modelled_current_distribution_list_equal_area.RDA")) {
+  load("../Calculated_data/predator_modelled_current_distribution_list_equal_area.RDA")} else {
+    source("predator_modelled_current_distribution.R")
+  }
+
+predator_modelled_current_DF<-predator_modelled_current_distribution_list
+
+# parasitoid_modelled_current_DF<-
+#   lapply(parasitoid_modelled_current_distribution_list, function(x){
+#     
+#     x[["current_hex_grid"]] |> 
+#       sf::st_drop_geometry() |> 
+#       as.data.frame()
+#   })
+
+```
+
+We also map the model the current distribution of NEs
+
+```{r NE-current-map, fig.dim=c(16, 12), include=FALSE}
+# NE_current_maps<-lapply(pest_list, function(x) {
+#   
+#   dat<-pest_modelled_current_distribution_list[[x]][["current_hex_grid"]]
+#   ggplot() +
+#     # geom_sf(data = world_map) +
+#     geom_sf(data = dat, aes(fill = mean_suitability,
+#                             color = mean_suitability)) +
+#     scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+#     scale_color_viridis_c(option = "plasma", na.value = "grey90", guide = "none") +
+#     #geom_sf(data = occ_points)
+#     theme_minimal() +
+#     labs(
+#       title = x,
+#       fill = "Current mean suitability"
+#     )
+# })
+# 
+# ggarrange(plotlist = NE_current_maps, ncol=4, nrow=4, common.legend = T)
+
+```
+
+## Modelling distributions of NE genera
+
+We collect the genera of NEs and model their current distribution. We add a data frame of all UTM squares/hexagons/cells they are expected to occur to the list.
+
+# Modelling future distributions of pests
+
+## Climate change scenario 1
+
+We model the future distribution of pests under X climate scenario and we add a data frame of all UTM squares/hexagons/cells they are expected to occur to the list.
+
+```{r pest-future-scenario-1}
+
+if (file.exists("../Calculated_data/pest_modelled_future_1_distribution_list_equal_area.RDA")) {
+  load("../Calculated_data/pest_modelled_future_1_distribution_list_equal_area.RDA")} else {
+    source("pest_modelled_future_1_distribution.R")
+  }
+
+
+```
+
+
+```{r pest-future-scenario-1-maps, fig.dim=c(16, 12)}
+
+pest_future_1_maps<-lapply(pest_list, function(x) {
+  
+  dat<-pest_modelled_future_1_distribution_list[[x]][["future_1_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = mean_suitability), color=NA) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Future 1 (moderate emission) mean suitability"
+    )
+})
+
+(pest_future_1_suitability_maps<-ggarrange(plotlist = pest_future_1_maps, ncol=4, nrow=4, common.legend = T))
+
+ggsave(file = "../Plots/pest_future_1_suitability_maps_equal_area.pdf", 
+       pest_future_1_suitability_maps,
+       width  = 16, height = 12)
+
+
+pest_future_1_maps_ant_diversity<-lapply(pest_list, function(x) {
+  
+  dat<-pest_modelled_future_1_distribution_list[[x]][["future_1_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = log1p(ant_diversity)), color=NA) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Future 1 (moderate emission) ant diversity"
+    )
+})
+
+(pest_future_1_maps_ant_diversity_maps<-ggarrange(plotlist = pest_future_1_maps, ncol=4, nrow=4, common.legend = T))
+
+ggsave(file = "../Plots/pest_future_1_maps_ant_diversity_maps_equal_area.pdf", 
+       pest_future_1_maps_ant_diversity_maps,
+       width  = 16, height = 12)
+
+```
+## Climate change scenario 2
+
+We model the future distribution of pests under X climate scenario and we add a data frame of all UTM squares/hexagons/cells they are expected to occur to the list.
+
+```{r pest-future-scenario-2}
+
+if (file.exists("../Calculated_data/pest_modelled_future_2_distribution_list_equal_area.RDA")) {
+  load("../Calculated_data/pest_modelled_future_2_distribution_list_equal_area.RDA")} else {
+    source("pest_modelled_future_2_distribution.R")
+  }
+
+```
+
+
+```{r pest-future-scenario-2-maps, fig.dim=c(16, 12)}
+pest_future_2_maps<-lapply(pest_list, function(x) {
+  
+  dat<-pest_modelled_future_2_distribution_list[[x]][["future_2_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = mean_suitability), color=NA) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Future 2 (high emission) mean suitability"
+    )
+})
+
+(pest_future_2_suitability_maps<-ggarrange(plotlist = pest_future_2_maps, ncol=4, nrow=4, common.legend = T))
+
+ggsave(file = "../Plots/pest_future_2_suitability_maps_equal_area.pdf", 
+       pest_future_2_suitability_maps,
+       width  = 16, height = 12)
+
+
+pest_future_2_maps_ant_diversity<-lapply(pest_list, function(x) {
+  
+  dat<-pest_modelled_future_2_distribution_list[[x]][["future_2_hex_grid"]]
+  
+  dat<-dat |> 
+    left_join(hex_grid, by = "hex_id") |> 
+    st_as_sf() |> 
+    mutate(geometry = st_make_valid(geometry))
+  
+  
+  ggplot() +
+    geom_sf(data = world_map, linewidth = 0.01, fill = NA) +
+    geom_sf(data = dat, aes(fill = log1p(ant_diversity)), color=NA) +
+    scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+    #geom_sf(data = occ_points)
+    theme_minimal() +
+    labs(
+      title = x,
+      fill = "Future 2 (high emission)ant diversity"
+    )
+})
+
+(pest_future_2_maps_ant_diversity_maps<-ggarrange(plotlist = 
+                                                   pest_future_2_maps_ant_diversity, 
+                                                 ncol=4, nrow=4, common.legend = T))
+
+ggsave(file = "../Plots/pest_future_2_maps_ant_diversity_maps_equal_area.pdf", 
+       pest_future_2_maps_ant_diversity_maps,
+       width  = 16, height = 12)
+```
+
+```{r current-parasitoid-pressure}
+
+if (file.exists("../Calculated_data/current_parasitoid_data.RDA")) {
+  load("../Calculated_data/current_parasitoid_data.RDA")} else {
+    source("pest_parasitoid_current_overlap.R")
+  }
+
+
+```
+```{r future1-parasitoid-pressure}
+
+if (file.exists("../Calculated_data/future1_parasitoid_data.RDA")) {
+  load("../Calculated_data/future1_parasitoid_data.RDA")} else {
+    source("pest_parasitoid_future1_overlap.R")
+  }
+
+
+```
+
+```{r future2-parasitoid-pressure}
+
+if (file.exists("../Calculated_data/future2_parasitoid_data.RDA")) {
+  load("../Calculated_data/future2_parasitoid_data.RDA")} else {
+    source("pest_parasitoid_future2_overlap.R")
+  }
+
+
+```
+
+```{r current-predator-pressure}
+
+if (file.exists("../Calculated_data/current_predator_data.RDA")) {
+  load("../Calculated_data/current_predator_data.RDA")} else {
+    source("pest_predator_current_overlap.R")
+  }
+
+
+```
+
+```{r future1-predator-pressure}
+
+if (file.exists("../Calculated_data/future1_predator_data.RDA")) {
+  load("../Calculated_data/future1_predator_data.RDA")} else {
+    source("pest_predator_future1_overlap.R")
+  }
+
+
+```
+
+```{r future2-predator-pressure}
+
+if (file.exists("../Calculated_data/future2_predator_data.RDA")) {
+  load("../Calculated_data/future2_predator_data.RDA")} else {
+    source("pest_predator_future2_overlap.R")
+  }
+
+
+```
+
+```{r change-data-preparation}
+
+
+current_NE_data_df<-
+  lapply(pest_list,
+         function(x){
+          # x = "Aphis_gossypii"
+           para_dat<-current_parasitoid_data[[x]]
+           para_dat<-as.data.frame(sapply(para_dat, unlist))
+           para_dat$parasitoid_count<-as.numeric(para_dat$parasitoid_count)
+           
+           if(!is.null(current_predator_data[[x]])){
+             pred_dat<-current_predator_data[[x]]
+             pred_dat<-as.data.frame(sapply(pred_dat, unlist))
+             pred_dat$predator_count<-as.numeric(pred_dat$predator_count)
+           } else {
+             pred_dat<-data.frame(hex_id = para_dat$hex_id,
+                                  predator_count = rep(0, length(para_dat$hex_id)))
+             
+          }
+           ant_dat<-pest_modelled_current_distribution_list[[x]][["current_hex_grid"]]
+           
+           ant_dat$hex_id<-as.character(ant_dat$hex_id)
+           
+           if(identical(para_dat$hex_id, ant_dat$hex_id) & 
+              identical(para_dat$hex_id, pred_dat$hex_id))
+           {
+           data.frame(pest_species = x,
+                      hex_id = para_dat$hex_id,
+                      parasitoid_count = para_dat$parasitoid_count,
+                      predator_count = pred_dat$predator_count,
+                      ant_diversity = ant_dat$ant_diversity)}
+           else{warning("Data frames are not the same!")}
+         })
+
+names(current_NE_data_df)<-pest_list
+
+
+future1_NE_data_df<-
+  lapply(pest_list,
+         function(x){
+           # x = "Aphis_gossypii"
+           para_dat<-future1_parasitoid_data[[x]]
+           para_dat<-as.data.frame(sapply(para_dat, unlist))
+           para_dat$parasitoid_count<-as.numeric(para_dat$parasitoid_count)
+           
+           if(!is.null(future1_predator_data[[x]])){
+             pred_dat<-future1_predator_data[[x]]
+             pred_dat<-as.data.frame(sapply(pred_dat, unlist))
+             pred_dat$predator_count<-as.numeric(pred_dat$predator_count)
+           } else {
+             pred_dat<-data.frame(hex_id = para_dat$hex_id,
+                                  predator_count = rep(0, length(para_dat$hex_id)))
+             
+           }
+           
+           ant_dat<-pest_modelled_future_1_distribution_list[[x]][["future_1_hex_grid"]]
+           
+           ant_dat$hex_id<-as.character(ant_dat$hex_id)
+           
+           if(identical(para_dat$hex_id, ant_dat$hex_id) & 
+              identical(para_dat$hex_id, pred_dat$hex_id))
+           {
+             data.frame(pest_species = x,
+                        hex_id = para_dat$hex_id,
+                        parasitoid_count = para_dat$parasitoid_count,
+                        predator_count = pred_dat$predator_count,
+                        ant_diversity = ant_dat$ant_diversity)}
+           else{warning("Data frames are not the same!")}
+         })
+
+names(future1_NE_data_df)<-pest_list
+
+
+
+future2_NE_data_df<-
+  lapply(pest_list,
+         function(x){
+           # x = "Aphis_gossypii"
+           para_dat<-future2_parasitoid_data[[x]]
+           para_dat<-as.data.frame(sapply(para_dat, unlist))
+           para_dat$parasitoid_count<-as.numeric(para_dat$parasitoid_count)
+           
+           if(!is.null(future2_predator_data[[x]])){
+             pred_dat<-future2_predator_data[[x]]
+             pred_dat<-as.data.frame(sapply(pred_dat, unlist))
+             pred_dat$predator_count<-as.numeric(pred_dat$predator_count)
+           } else {
+             pred_dat<-data.frame(hex_id = para_dat$hex_id,
+                                  predator_count = rep(0, length(para_dat$hex_id)))
+             
+           }
+           
+           ant_dat<-pest_modelled_future_2_distribution_list[[x]][["future_2_hex_grid"]]
+           
+           ant_dat$hex_id<-as.character(ant_dat$hex_id)
+           
+           if(identical(para_dat$hex_id, ant_dat$hex_id) & 
+              identical(para_dat$hex_id, pred_dat$hex_id))
+           {
+             data.frame(pest_species = x,
+                        hex_id = para_dat$hex_id,
+                        parasitoid_count = para_dat$parasitoid_count,
+                        predator_count = pred_dat$predator_count,
+                        ant_diversity = ant_dat$ant_diversity)}
+           else{warning("Data frames are not the same!")}
+         })
+
+names(future2_NE_data_df)<-pest_list
+
+
+
+
+spp_summary_df<-data.frame(
+current_parasitoid_mean = sapply(current_NE_data_df, function(x) mean(x$parasitoid_count)),
+future1_parasitoid_mean = sapply(future1_NE_data_df, function(x) mean(x$parasitoid_count)),
+future2_parasitoid_mean = sapply(future2_NE_data_df, function(x) mean(x$parasitoid_count)),
+
+current_predator_mean = sapply(current_NE_data_df, function(x) mean(x$predator_count)),
+future1_predator_mean = sapply(future1_NE_data_df, function(x) mean(x$predator_count)),
+future2_predator_mean = sapply(future2_NE_data_df, function(x) mean(x$predator_count)),
+
+current_ant_mean = sapply(current_NE_data_df, function(x) mean(x$ant_diversity, na.rm = T)),
+future1_ant_mean = sapply(future1_NE_data_df, function(x) mean(x$ant_diversity, na.rm = T)),
+future2_ant_mean = sapply(future2_NE_data_df, function(x) mean(x$ant_diversity, na.rm = T)),
+
+current_parasitoid_sd = sapply(current_NE_data_df, function(x) sd(x$parasitoid_count)),
+future1_parasitoid_sd = sapply(future1_NE_data_df, function(x) sd(x$parasitoid_count)),
+future2_parasitoid_sd = sapply(future2_NE_data_df, function(x) sd(x$parasitoid_count)),
+
+current_predator_sd = sapply(current_NE_data_df, function(x) sd(x$predator_count)),
+future1_predator_sd = sapply(future1_NE_data_df, function(x) sd(x$predator_count)),
+future2_predator_sd = sapply(future2_NE_data_df, function(x) sd(x$predator_count)),
+
+current_ant_sd = sapply(current_NE_data_df, function(x) sd(x$ant_diversity, na.rm = T)),
+future1_ant_sd = sapply(future1_NE_data_df, function(x) sd(x$ant_diversity, na.rm = T)),
+future2_ant_sd = sapply(future2_NE_data_df, function(x) sd(x$ant_diversity, na.rm = T)),
+
+current_occupied = sapply(current_NE_data_df, function(x) nrow(x)),
+future1_occupied = sapply(future1_NE_data_df, function(x) nrow(x)),
+future2_occupied = sapply(future2_NE_data_df, function(x) nrow(x)),
+
+current_parasitoid_median = sapply(current_NE_data_df, function(x) median(x$parasitoid_count)),
+future1_parasitoid_median = sapply(future1_NE_data_df, function(x) median(x$parasitoid_count)),
+future2_parasitoid_median = sapply(future2_NE_data_df, function(x) median(x$parasitoid_count)),
+
+current_predator_median = sapply(current_NE_data_df, function(x) median(x$parasitoid_count)),
+future1_predator_median = sapply(future1_NE_data_df, function(x) median(x$parasitoid_count)),
+future2_predator_median = sapply(future2_NE_data_df, function(x) median(x$parasitoid_count)),
+
+current_ant_median = sapply(current_NE_data_df, function(x) median(x$ant_diversity, na.rm = T)),
+future1_ant_median = sapply(future1_NE_data_df, function(x) median(x$ant_diversity, na.rm = T)),
+future2_ant_median = sapply(future2_NE_data_df, function(x) median(x$ant_diversity, na.rm = T)),
+
+current_parasitoid_area_perc = sapply(current_NE_data_df, 
+                                      function(x) {
+                                        length(x$parasitoid_count[x$parasitoid_count>0])/
+                                          length(x$parasitoid_count)}),
+future1_parasitoid_area_perc = sapply(future1_NE_data_df, 
+                                      function(x) {
+                                        length(x$parasitoid_count[x$parasitoid_count>0])/
+                                          length(x$parasitoid_count)}),
+future2_parasitoid_area_perc = sapply(future2_NE_data_df, 
+                                      function(x) {
+                                        length(x$parasitoid_count[x$parasitoid_count>0])/
+                                          length(x$parasitoid_count)}),
+
+current_predator_area_perc = sapply(current_NE_data_df, 
+                                      function(x) {
+                                        length(x$predator_count[x$predator_count>0])/
+                                          length(x$predator_count)}),
+future1_predator_area_perc = sapply(future1_NE_data_df, 
+                                      function(x) {
+                                        length(x$predator_count[x$predator_count>0])/
+                                          length(x$predator_count)}),
+future2_predator_area_perc = sapply(future2_NE_data_df, 
+                                      function(x) {
+                                        length(x$predator_count[x$predator_count>0])/
+                                          length(x$predator_count)}),
+
+current_ant_area_perc = sapply(current_NE_data_df, 
+                                      function(x) {
+                                        length(x$ant_diversity[x$ant_diversity>0])/
+                                          length(x$ant_diversity)}),
+future1_ant_area_perc = sapply(future1_NE_data_df, 
+                                      function(x) {
+                                        length(x$ant_diversity[x$ant_diversity>0])/
+                                          length(x$ant_diversity)}),
+future2_ant_area_perc = sapply(future2_NE_data_df, 
+                                      function(x) {
+                                        length(x$ant_diversity[x$ant_diversity>0])/
+                                          length(x$ant_diversity)}),
+
+species = pest_list
+)
+
+spp_results<-spp_summary_df |>
+  mutate(future1_occupied_area_perc = current_occupied/future1_occupied,
+         future2_occupied_area_perc = current_occupied/future2_occupied) |> 
+  rowwise() |>
+  mutate(
+    parasitoid_result_future1 = list(compare_groups(current_parasitoid_mean, 
+                                                    current_parasitoid_sd, 
+                                                    current_occupied,
+                                                    
+                                                    future1_parasitoid_mean, 
+                                                    future1_parasitoid_sd, 
+                                                    future1_occupied)),
+    parasitoid_result_future2 = list(compare_groups(current_parasitoid_mean, 
+                                                    current_parasitoid_sd, 
+                                                    current_occupied,
+                                                    
+                                                    future2_parasitoid_mean, 
+                                                    future2_parasitoid_sd, 
+                                                    future2_occupied))
+  ) |>
+  mutate(
+    predator_result_future1 = list(compare_groups(current_predator_mean, 
+                                                  current_predator_sd, 
+                                                  current_occupied,
+                                                  
+                                                  future1_predator_mean, 
+                                                  future1_predator_sd, 
+                                                  future1_occupied)),
+    predator_result_future2 = list(compare_groups(current_predator_mean, 
+                                                  current_predator_sd, 
+                                                  current_occupied, 
+                                                  
+                                                  future2_predator_mean, 
+                                                  future2_predator_sd, 
+                                                  future2_occupied))
+  ) |>
+  mutate(
+    ant_result_future1 = list(compare_groups(current_ant_mean, 
+                                         current_ant_sd, 
+                                         current_occupied, 
+                                         
+                                         future1_ant_mean, 
+                                         future1_ant_sd, 
+                                         future1_occupied)),
+    ant_result_future2 = list(compare_groups(current_ant_mean, 
+                                         current_ant_sd, 
+                                         current_occupied, 
+                                         
+                                         future2_ant_mean, 
+                                         future2_ant_sd, 
+                                         future2_occupied))
+  ) |>
+  unnest_wider(parasitoid_result_future1, names_sep = "_future1") |>
+  unnest_wider(parasitoid_result_future2, names_sep = "_future2") |> 
+  
+  unnest_wider(predator_result_future1, names_sep = "_future1") |>
+  unnest_wider(predator_result_future2, names_sep = "_future2") |> 
+  
+  unnest_wider(ant_result_future1, names_sep = "_future1") |>
+  unnest_wider(ant_result_future2, names_sep = "_future2")
+
+spp_results<-merge(spp_results, pest_groups, by.x = "species", by.y = "pest_species",
+                   all.x = T)
+
+
+spp_results<-spp_results[, c(1, ncol(spp_results), 2:(ncol(spp_results)-1))]
+
+write.table(spp_results, file = "../Calculated_data/pest_changes_results.csv", 
+            col.names = T, row.names = F, sep= ",")
+
+pest_NE_changes_1<-lapply(pest_list, function(x){
+  current<-current_NE_data_df[[x]][,c("hex_id",
+                                      "parasitoid_count",
+                                      "predator_count",
+                                      "ant_diversity")]
+
+  future1<-future1_NE_data_df[[x]][,c("hex_id",
+                                      "parasitoid_count",
+                                      "predator_count",
+                                      "ant_diversity")]
+  
+  dat<-data.frame(hex_id = sort(unique(c(current[["hex_id"]],
+                      future1[["hex_id"]]))),
+                  pest_species =  x)
+  dat<-dat |> 
+    left_join(current, by = "hex_id") |> 
+    left_join(future1, by = "hex_id", suffix = c("_current", "_F1")) |> 
+    mutate(pest_change_C_F1 = case_when(
+      is.na(parasitoid_count_current) & !is.na(parasitoid_count_F1) ~ "spread",
+      !is.na(parasitoid_count_current) & is.na(parasitoid_count_F1) ~ "recede",
+      !is.na(parasitoid_count_current) & !is.na(parasitoid_count_F1) ~ "stable",
+      TRUE ~ "other")) |> 
+    mutate(parasitoid_count = case_when(
+      is.na(parasitoid_count_current) & !is.na(parasitoid_count_F1) ~ log1p(parasitoid_count_F1),
+      is.na(parasitoid_count_F1) & !is.na(parasitoid_count_current) ~ log1p(parasitoid_count_current),
+      TRUE ~ log1p(parasitoid_count_current))
+    ) |> 
+    
+    mutate(predator_count = case_when(
+      is.na(predator_count_current) & !is.na(predator_count_F1) ~ log1p(predator_count_F1),
+      is.na(parasitoid_count_F1) & !is.na(predator_count_current) ~ log1p(predator_count_current),
+      TRUE ~ log1p(predator_count_current))) |> 
+    
+    mutate(ant_count = case_when(
+      is.na(ant_diversity_current) & !is.na(ant_diversity_F1) ~ log1p(ant_diversity_F1),
+      is.na(ant_diversity_F1) & !is.na(ant_diversity_current) ~ log1p(ant_diversity_current),
+      TRUE ~ log1p(ant_diversity_current))
+    )
+})
+
+names(pest_NE_changes_1)<-pest_list
+
+pest_NE_changes_2<-lapply(pest_list, function(x){
+  current<-current_NE_data_df[[x]][,c("hex_id",
+                                      "parasitoid_count",
+                                      "predator_count",
+                                      "ant_diversity")]
+  future2<-future2_NE_data_df[[x]][,c("hex_id",
+                                      "parasitoid_count",
+                                      "predator_count",
+                                      "ant_diversity")]
+  
+  dat<-data.frame(hex_id = sort(unique(c(current[["hex_id"]],
+                                         future2[["hex_id"]]))),
+                  pest_species =  x)
+  
+  colnames(dat)
+  dat<-dat |> 
+    left_join(current, by = "hex_id") |> 
+    left_join(future2, by = "hex_id", suffix = c("_current", "_F2")) |> 
+    mutate(pest_change_C_F2 = case_when(
+      is.na(parasitoid_count_current) & !is.na(parasitoid_count_F2) ~ "spread",
+      !is.na(parasitoid_count_current) & is.na(parasitoid_count_F2) ~ "recede",
+      !is.na(parasitoid_count_current) & !is.na(parasitoid_count_F2) ~ "stable",
+      TRUE ~ "other")) |> 
+    mutate(parasitoid_count = case_when(
+      is.na(parasitoid_count_current) & !is.na(parasitoid_count_F2) ~ log1p(parasitoid_count_F2),
+      is.na(parasitoid_count_F2) & !is.na(parasitoid_count_current) ~ log1p(parasitoid_count_current),
+      TRUE ~ log1p(parasitoid_count_current))
+    
+    # mutate(mean_parasitoid_num = mean(parasitoid_count_current),
+    #        parasitoid_count = case_when(
+    #           is.na(parasitoid_count_current) & !is.na(parasitoid_count_F2) ~ parasitoid_count_F2/mean_parasitoid_num,
+    #           is.na(parasitoid_count_F2) & !is.na(parasitoid_count_current) ~ parasitoid_count_current/mean_parasitoid_num,
+    #           TRUE ~ parasitoid_count_current/mean_parasitoid_num)
+    ) |> 
+    
+    mutate(predator_count = case_when(
+      is.na(predator_count_current) & !is.na(predator_count_F2) ~ log1p(predator_count_F2),
+      is.na(parasitoid_count_F2) & !is.na(predator_count_current) ~ log1p(predator_count_current),
+      TRUE ~ log1p(predator_count_current))) |> 
+    
+    mutate(ant_count = case_when(
+      is.na(ant_diversity_current) & !is.na(ant_diversity_F2) ~ log1p(ant_diversity_F2),
+      is.na(ant_diversity_F2) & !is.na(ant_diversity_current) ~ log1p(ant_diversity_current),
+      TRUE ~ log1p(ant_diversity_current))
+    )
+        
+})
+
+names(pest_NE_changes_2)<-pest_list
+
+```
+
+```{r parasitoid-pressure-change-occupied-area-bubble-chart, fig.dim=c(14, 10)}
+
+spp_long <- spp_results %>%
+  mutate(
+    log_current_mean = log1p(current_parasitoid_mean),   # Log-transform parasitoid pressure
+    log_occupied = log1p(current_occupied)    # Log-transform occupied cells for bubble size
+  ) %>%
+  pivot_longer(
+    cols = c(parasitoid_result_future1_future1cohen_d, 
+             parasitoid_result_future2_future2cohen_d),
+    names_to = "Scenario",
+    values_to = "Cohen_d"
+  ) %>%
+  mutate(
+    Scenario = recode(Scenario, 
+                      "parasitoid_result_future1_future1cohen_d" = "Moderate emission", 
+                      "parasitoid_result_future2_future2cohen_d" = "High emission"),
+        Scenario = factor(Scenario, levels = rev(sort(unique(Scenario))))
+  )
+
+
+# Create the improved faceted bubble plot
+ggplot(spp_long, aes(x = log_current_mean, 
+                     y = Cohen_d, 
+                     size = log_occupied, 
+                     color = species)) +
+  geom_point(alpha = 0.8) +
+  #geom_smooth(method = "loess", se = TRUE, color = "red", linewidth = 1, alpha = 0.7) +
+  facet_wrap(~ Scenario) +  # Facet by scenario
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at y=0
+  labs(
+    x = "Log of the mean of current parasitoid pressure",
+    y = "Cohen's d (Effect Size)",
+    title = "Effect size as a function of parasitoid pressure, separated by climate change scenario",
+    color = "Species",
+    size = "Area occupied (log-scale)"  # Renamed legend title
+  ) +
+  scale_color_manual(values = pest_colors) +  # Use distinct colors
+  scale_size(range = c(3, 12)) +  # Adjust bubble sizes for better visibility
+  guides(
+    color = guide_legend(
+      override.aes = list(size = 5),  # Bigger symbols for species
+      ncol = 1,  # Forces vertical alignment (one column for species)
+      position = "right",  # Keeps "Area occupied (log-scale)" clear
+      direction = "vertical"  # Ensures the area legend stays vertical
+    ),
+    size = guide_legend(
+      override.aes = list(color = "#2A9D8F"),  # Colored dots in the legend
+      position = "bottom",  # Keeps "Area occupied (log-scale)" clear
+      direction = "horizontal"  # Ensures the area legend stays horizontal
+    )
+  ) +
+  theme_cleveland()+
+  theme(axis.title.y = element_text())
+
+
+ggsave("../Plots/parasitoid_bubble_chart_Cohens.pdf", width = 14, height = 10)
+
+```
+
+
+
+```{r ant-pressure-change-occupied-area-bubble-chart, fig.dim=c(14, 10)}
+
+spp_long <- spp_results %>%
+  mutate(
+    log_current_mean = log1p(current_ant_mean),   # Log-transform parasitoid pressure
+    log_occupied = log1p(current_occupied)    # Log-transform occupied cells for bubble size
+  ) %>%
+  pivot_longer(
+    cols = c(ant_result_future1_future1cohen_d, 
+             ant_result_future2_future2cohen_d),
+    names_to = "Scenario",
+    values_to = "Cohen_d"
+  ) %>%
+  mutate(
+    Scenario = recode(Scenario, 
+                      "ant_result_future1_future1cohen_d" = "Moderate emission", 
+                      "ant_result_future2_future2cohen_d" = "High emission"),
+        Scenario = factor(Scenario, levels = rev(sort(unique(Scenario))))
+  )
+
+
+# Create the improved faceted bubble plot
+ggplot(spp_long, aes(x = log_current_mean, 
+                     y = Cohen_d, 
+                     size = log_occupied, 
+                     color = species)) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~ Scenario) +  # Facet by scenario
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at y=0
+  labs(
+    x = "Log of the mean of current ant pressure",
+    y = "Cohen's d (Effect size)",
+    title = "Effect size as a function of ant pressure, separated by climate change scenario",
+    color = "Species",
+    size = "Area occupied (log-scale)"  # Renamed legend title
+  ) +
+  scale_color_manual(values = pest_colors) +  # Use distinct colors
+  scale_size(range = c(3, 12)) +  # Adjust bubble sizes for better visibility
+  guides(
+    color = guide_legend(
+      override.aes = list(size = 5),  # Bigger symbols for species
+      ncol = 1,  # Forces vertical alignment (one column for species)
+      position = "right",  # Keeps "Area occupied (log-scale)" clear
+      direction = "vertical"  # Ensures the area legend stays vertical
+    ),
+    size = guide_legend(
+      override.aes = list(color = "#2A9D8F"),  # Colored dots in the legend
+      position = "bottom",  # Keeps "Area occupied (log-scale)" clear
+      direction = "horizontal"  # Ensures the area legend stays horizontal
+    )
+  ) +
+  theme_cleveland()+
+  theme(axis.title.y = element_text())
+
+
+ggsave("../Plots/ant_bubble_chart_Cohens.pdf", width = 14, height = 10)
+
+```
+
+
+```{r predator-pressure-change-occupied-area-bubble-chart, fig.dim=c(14, 10)}
+
+spp_long <- spp_results %>%
+  mutate(
+    log_current_mean = log1p(current_predator_mean),   # Log-transform parasitoid pressure
+    log_occupied = log1p(current_occupied)    # Log-transform occupied cells for bubble size
+  ) %>%
+  pivot_longer(
+    cols = c(predator_result_future1_future1cohen_d, 
+             predator_result_future2_future2cohen_d),
+    names_to = "Scenario",
+    values_to = "Cohen_d"
+  ) %>%
+  mutate(
+    Scenario = recode(Scenario, 
+                      "predator_result_future1_future1cohen_d" = "Moderate emission", 
+                      "predator_result_future2_future2cohen_d" = "High emission"),
+        Scenario = factor(Scenario, levels = rev(sort(unique(Scenario))))
+  )
+
+
+# Create the improved faceted bubble plot
+ggplot(spp_long, aes(x = log_current_mean, 
+                     y = Cohen_d, 
+                     size = log_occupied, 
+                     color = species)) +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~ Scenario) +  # Facet by scenario
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at y=0
+  labs(
+    x = "Log of the mean of current predator pressure",
+    y = "Cohen's d (Effect size)",
+    title = "Effect size as a function of predator pressure, separated by climate change scenario",
+    color = "Species",
+    size = "Area occupied (log-scale)"  # Renamed legend title
+  ) +
+  scale_color_manual(values = pest_colors) +  # Use distinct colors
+  scale_size(range = c(3, 12)) +  # Adjust bubble sizes for better visibility
+  guides(
+    color = guide_legend(
+      override.aes = list(size = 5),  # Bigger symbols for species
+      ncol = 1,  # Forces vertical alignment (one column for species)
+      position = "right",  # Keeps "Area occupied (log-scale)" clear
+      direction = "vertical"  # Ensures the area legend stays vertical
+    ),
+    size = guide_legend(
+      override.aes = list(color = "#2A9D8F"),  # Colored dots in the legend
+      position = "bottom",  # Keeps "Area occupied (log-scale)" clear
+      direction = "horizontal"  # Ensures the area legend stays horizontal
+    )
+  ) +
+  theme_cleveland()+
+  theme(axis.title.y = element_text())
+
+
+ggsave("../Plots/predator_bubble_chart_Cohens.pdf", width = 14, height = 10)
+
+```
+
+# Final outputs:
+
+(1) for each recorded square of pests: how many recorded NEs (separated as parasitoids, predators, and all)
+
+(2) for each modelled current distribution square of pests:
+  
+  (3) how many recorded NEs (separated as parasitoids, predators, and all)
+
+(4) how many modelled NEs (separated as parasitoids, predators, and all)
+
+(5) for each modelled future distribution (Scenario 1) square of pests:
+  
+  (1) how many recorded NEs (separated as parasitoids, predators, and all)
+
+(2) how many modelled NEs (separated as parasitoids, predators, and all)
+
+(3) how many modelled NE genera (separated as parasitoids, predators, and all)
+
+(4) how many modelled future (Scenario 1) NEs (separated as parasitoids, predators, and all)
+
+(6) for each modelled future distribution (Scenario 2) square of pests:
+  
+  (1) how many recorded NEs (separated as parasitoids, predators, and all)
+
+(2) how many modelled NEs (separated as parasitoids, predators, and all)
+
+(3) how many modelled NE genera (separated as parasitoids, predators, and all)
+
+(4) how many modelled future (Scenario 2) NEs (separated as parasitoids, predators, and all)
